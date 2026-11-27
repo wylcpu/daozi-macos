@@ -1525,7 +1525,26 @@ fn number_stepper<N:egui::emath::Numeric>(ui:&mut egui::Ui,value:&mut N,min:N,ma
         if decrease.clicked(){
             *value=N::from_f64((value.to_f64()-step.to_f64()).max(min.to_f64()));changed=true;
         }
-        let field=ui.add_sized([field_width,28.0],egui::DragValue::new(value).range(min..=max).speed(step.to_f64()).suffix(suffix).fixed_decimals(if N::INTEGRAL{0}else{2}));
+        let unit=suffix.trim_start();
+        let unit_width=if unit.is_empty(){0.0}else{
+            ui.painter().layout_no_wrap(unit.to_owned(),egui::TextStyle::Body.resolve(ui.style()),ui.visuals().text_color()).size().x
+        };
+        let unit_gap=if unit.is_empty(){0.0}else{1.0};
+        let number_width=(field_width-unit_width-unit_gap).max(28.0);
+        let field=ui.horizontal(|ui|{
+            ui.spacing_mut().item_spacing.x=unit_gap;
+            let field=ui.add_sized([number_width,28.0],egui::DragValue::new(value).range(min..=max).speed(step.to_f64()).fixed_decimals(if N::INTEGRAL{0}else{2}));
+            if !unit.is_empty(){
+                let galley=ui.painter().layout_no_wrap(unit.to_owned(),egui::TextStyle::Body.resolve(ui.style()),ui.visuals().text_color());
+                let (rect,_)=ui.allocate_exact_size(galley.size(),egui::Sense::hover());
+                ui.painter().galley(
+                    egui::pos2(rect.left(),rect.center().y-galley.mesh_bounds.center().y),
+                    galley,
+                    ui.visuals().text_color(),
+                );
+            }
+            field
+        }).inner;
         changed|=field.changed();
         if ui.add_enabled(*value<max,button("+").min_size(egui::vec2(26.0,26.0))).on_hover_text("增加").clicked(){
             *value=N::from_f64((value.to_f64()+step.to_f64()).min(max.to_f64()));changed=true;

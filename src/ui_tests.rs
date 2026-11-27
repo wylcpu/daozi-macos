@@ -2561,7 +2561,9 @@ fn music_lyric_timing_controls_match_focus_save_and_fit_the_small_settings_windo
     }).unwrap_or_else(||panic!("设置中缺少 {text}"));
     for _ in 0..3{frame(&mut h,vec![]);}
     let music=frame(&mut h,vec![]);
-    text_rect(&music,"0.35 秒");
+    let delay=text_rect(&music,"0.35");
+    let seconds=text_rect(&music,"秒");
+    assert!((delay.center().y-seconds.center().y).abs()<0.8,"数字和秒单位应垂直居中");
     assert_eq!(h.app.settings.lyric_delay_ms,-350,"仅打开设置不能将 0.35 秒舍入为 0.4 秒");
     for button in ["−","+"]{text_rect(&music,button);}
     h.app.settings_tab=2;
@@ -2582,7 +2584,10 @@ fn music_lyric_timing_controls_match_focus_save_and_fit_the_small_settings_windo
         frame(&mut h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
         assert_eq!(h.app.settings.lyric_delay_ms,expected);
         assert_eq!(crate::model::Settings::load().lyric_delay_ms,expected,"按钮调整后应自动保存");
-        text_rect(&frame(&mut h,vec![]),&format!("{:.2} 秒",-expected as f64/1000.0));
+        let shapes=frame(&mut h,vec![]);
+        let value=text_rect(&shapes,&format!("{:.2}",-expected as f64/1000.0));
+        let unit=text_rect(&shapes,"秒");
+        assert!((value.center().y-unit.center().y).abs()<0.8,"调整后数字和秒单位仍应垂直居中");
     }
 }
 
@@ -8074,18 +8079,28 @@ fn settings_theme_follows_system_and_preserves_island_style() {
                 let child=output.lock().unwrap().take().unwrap();
                 if frame==2 {
                     let pairs:&[(&str,&str)]=match tab {
-                        1=>&[("时间偏移","0.35 秒")],
-                        2=>&[("专注","25 分钟"),("休息","5 分钟")],
-                        3=>&[("每日目标","2000 ml"),("每次记录","250 ml"),("提醒间隔","45 分钟"),("提醒时段","9 时")],
+                        1=>&[("时间偏移","0.35")],
+                        2=>&[("专注","25"),("休息","5")],
+                        3=>&[("每日目标","2000"),("每次记录","250"),("提醒间隔","45"),("提醒时段","9")],
                         7=>&[("邮箱","输入邮箱地址"),("授权码","输入邮箱授权码")],
                         8=>&[("会议提前","15 分钟"),("用户名","输入用户名或粘贴账号信息"),("密码","输入平台生成的密码")],
                         11=>&[("服务","Codex"),("备注","例如：个人、工作、备用"),("选择该账号的登录文件","选择…")],
                         _=>&[],
                     };
+                    let centers=|needle:&str|child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==needle=>Some(t.visual_bounding_rect().center().y),_=>None}).collect::<Vec<_>>();
                     for (label,value) in pairs {
-                        let centers=|needle:&str|child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==needle=>Some(t.visual_bounding_rect().center().y),_=>None}).collect::<Vec<_>>();
                         let distance=centers(label).iter().flat_map(|a|centers(value).into_iter().map(move|b|(a-b).abs())).fold(f32::INFINITY,f32::min);
                         assert!(distance<=5.0,"设置页 {tab} 的 {label} 与 {value} 未居中：{distance}");
+                    }
+                    let units:&[(&str,&str)]=match tab {
+                        1=>&[("0.35","秒")],
+                        2=>&[("25","分钟"),("5","分钟")],
+                        3=>&[("2000","ml"),("250","ml"),("45","分钟"),("9","时")],
+                        _=>&[],
+                    };
+                    for (number,unit) in units {
+                        let distance=centers(number).iter().flat_map(|a|centers(unit).into_iter().map(move |b|(a-b).abs())).fold(f32::INFINITY,f32::min);
+                        assert!(distance<0.8,"设置页 {tab} 的数字 {number} 与单位 {unit} 没有按可见字形垂直居中：{distance}");
                     }
                 }
                 if (tab==0||tab==crate::extras::SETTINGS_TAB_POSITION) && frame==2 {
