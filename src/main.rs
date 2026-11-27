@@ -579,7 +579,8 @@ impl Shell {
             },
             browser_at_top: {
                 #[cfg(windows)] {if self.app.settings.browser_minimal {self.native.as_mut().and_then(|native|native.browser_at_top(&self.app.settings))}else{None}}
-                #[cfg(not(windows))] {None}
+                #[cfg(target_os="macos")] {daozai::macos::browser_at_top(&self.app.settings)}
+                #[cfg(all(not(windows),not(target_os="macos")))] {None}
             },
             media: media_snapshot,
             #[cfg(windows)]

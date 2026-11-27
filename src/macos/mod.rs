@@ -1,6 +1,14 @@
 //! macOS integration used by the otherwise cross-platform island UI.
 
 use crate::display_layout::{Bounds, Display};
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+use core_foundation::number::CFNumber;
+use core_foundation::string::CFString;
+use core_graphics::window::{
+    copy_window_info, kCGWindowBounds, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+    kCGWindowListOptionOnScreenOnly, kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID,
+};
 use objc::runtime::{Class, Object};
 use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::c_void;
@@ -13,6 +21,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 
 static OUTPUT_VOLUME_CACHE: Mutex<Option<(Instant, Option<(u32, bool)>)>> = Mutex::new(None);
 static NETWORK_CACHE: Mutex<Option<(Instant, Option<bool>)>> = Mutex::new(None);
+static AVOIDANCE_CACHE: Mutex<Option<(Instant, Option<bool>)>> = Mutex::new(None);
 static AUDIO_WORKER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 static NETWORK_WORKER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
@@ -209,6 +218,311 @@ pub fn window_frame() -> Option<(f32, f32, f32, f32)> {
             frame.height as f32,
         ))
     }
+}
+
+#[derive(Clone, Debug)]
+struct NativeWindow {
+    pid: i32,
+    layer: i64,
+    name: String,
+    title: String,
+    bounds: Bounds,
+}
+
+unsafe fn nsstring(object: *mut Object) -> Option<String> {
+    if object.is_null() {
+        return None;
+    }
+    let text: *const std::ffi::c_char = msg_send![object, UTF8String];
+    (!text.is_null()).then(|| std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned())
+}
+
+fn application_path(pid: i32) -> Option<String> {
+    unsafe {
+        let class = Class::get("NSRunningApplication")?;
+        let application: *mut Object =
+            msg_send![class, runningApplicationWithProcessIdentifier: pid];
+        if application.is_null() {
+            return None;
+        }
+        let url: *mut Object = msg_send![application, bundleURL];
+        if url.is_null() {
+            return None;
+        }
+        let path: *mut Object = msg_send![url, path];
+        nsstring(path)
+    }
+}
+
+fn frontmost_application() -> Option<(i32, String, String)> {
+    unsafe {
+        let workspace_class = Class::get("NSWorkspace")?;
+        let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
+        let application: *mut Object = msg_send![workspace, frontmostApplication];
+        if application.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![application, processIdentifier];
+        let name = nsstring(msg_send![application, localizedName]).unwrap_or_else(|| "应用".into());
+        let path = application_path(pid).unwrap_or_default();
+        (pid > 0).then_some((pid, name, path))
+    }
+}
+
+fn cf_dictionary(value: *const c_void) -> Option<CFDictionary<CFString, CFType>> {
+    (!value.is_null()).then(|| unsafe {
+        CFDictionary::wrap_under_get_rule(value as CFDictionaryRef)
+    })
+}
+
+fn dictionary_number(
+    dictionary: &CFDictionary<CFString, CFType>,
+    key: &str,
+) -> Option<f64> {
+    let key = CFString::new(key);
+    dictionary
+        .find(&key)
+        .and_then(|value| value.downcast::<CFNumber>())
+        .and_then(|number| number.to_f64())
+}
+
+fn window_bounds(
+    dictionary: &CFDictionary<CFString, CFType>,
+) -> Option<Bounds> {
+    let key = unsafe { CFString::wrap_under_get_rule(kCGWindowBounds) };
+    let bounds = cf_dictionary(dictionary.find(&key)?.as_CFTypeRef())?;
+    let x = dictionary_number(&bounds, "X")?;
+    let y = dictionary_number(&bounds, "Y")?;
+    let width = dictionary_number(&bounds, "Width")?;
+    let height = dictionary_number(&bounds, "Height")?;
+    (width > 0.0 && height > 0.0).then(|| Bounds {
+        left: x.round() as i32,
+        top: y.round() as i32,
+        right: (x + width).round() as i32,
+        bottom: (y + height).round() as i32,
+    })
+}
+
+fn onscreen_windows() -> Vec<NativeWindow> {
+    let Some(info) = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        0,
+    ) else {
+        return Vec::new();
+    };
+    let mut windows = Vec::new();
+    for index in 0..info.len() {
+        let Some(value) = info.get(index) else {
+            continue;
+        };
+        let Some(dictionary) = cf_dictionary(*value) else {
+            continue;
+        };
+        let pid_key = unsafe { CFString::wrap_under_get_rule(kCGWindowOwnerPID) };
+        let layer_key = unsafe { CFString::wrap_under_get_rule(kCGWindowLayer) };
+        let pid = dictionary
+            .find(&pid_key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|number| number.to_i32());
+        let layer = dictionary
+            .find(&layer_key)
+            .and_then(|value| value.downcast::<CFNumber>())
+            .and_then(|number| number.to_i64())
+            .unwrap_or_default();
+        let Some(bounds) = window_bounds(&dictionary) else {
+            continue;
+        };
+        let Some(pid) = pid.filter(|pid| *pid > 0) else {
+            continue;
+        };
+        let name_key = unsafe { CFString::wrap_under_get_rule(kCGWindowOwnerName) };
+        let title_key = unsafe { CFString::wrap_under_get_rule(kCGWindowName) };
+        let name = dictionary
+            .find(&name_key)
+            .and_then(|value| value.downcast::<CFString>())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let title = dictionary
+            .find(&title_key)
+            .and_then(|value| value.downcast::<CFString>())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        windows.push(NativeWindow {
+            pid,
+            layer,
+            name,
+            title,
+            bounds,
+        });
+    }
+    windows
+}
+
+fn is_browser_application(name: &str, path: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let path = path.to_ascii_lowercase();
+    [
+        "safari",
+        "google chrome",
+        "firefox",
+        "microsoft edge",
+        "brave browser",
+        "arc",
+        "vivaldi",
+        "opera",
+        "zen browser",
+        "orion",
+        "chromium",
+    ]
+    .iter()
+    .any(|browser| name == *browser || path.ends_with(&format!("/{browser}.app")))
+}
+
+fn window_overlaps_island(window: Bounds, island: Bounds) -> bool {
+    window.left < island.right
+        && window.right > island.left
+        && window.top < island.bottom
+        && window.bottom > island.top
+}
+
+fn island_hit_bounds(canvas: Bounds, dock: crate::model::Dock) -> Bounds {
+    if dock.is_side() {
+        let scale = (canvas.bottom - canvas.top) as f32 / crate::side_dock::SIDE_H;
+        let center_y =
+            canvas.top as f32 + crate::side_dock::SIDE_H * scale / 2.0;
+        let half = crate::app::PH * scale / 2.0;
+        let strip = crate::side_dock::SIDE_BAR_W * scale;
+        Bounds {
+            left: if dock == crate::model::Dock::Left {
+                canvas.left
+            } else {
+                (canvas.right as f32 - strip) as i32
+            },
+            top: (center_y - half) as i32,
+            right: if dock == crate::model::Dock::Left {
+                (canvas.left as f32 + strip) as i32
+            } else {
+                canvas.right
+            },
+            bottom: (center_y + half) as i32,
+        }
+    } else {
+        let scale = (canvas.right - canvas.left) as f32 / crate::app::CANVAS_W;
+        let center_x = canvas.left as f32 + crate::app::WIN_W * scale / 2.0;
+        let half = crate::app::PW * scale / 2.0;
+        let height = crate::app::BAR_H * scale;
+        Bounds {
+            left: (center_x - half) as i32,
+            top: if dock == crate::model::Dock::Bottom {
+                (canvas.bottom as f32 - height) as i32
+            } else {
+                canvas.top
+            },
+            right: (center_x + half) as i32,
+            bottom: if dock == crate::model::Dock::Bottom {
+                canvas.bottom
+            } else {
+                (canvas.top as f32 + height) as i32
+            },
+        }
+    }
+}
+
+pub(crate) fn avoidance_candidates() -> Result<Vec<crate::avoidance::Candidate>, String> {
+    let own_pid = std::process::id() as i32;
+    let mut candidates = Vec::new();
+    for window in onscreen_windows() {
+        if window.pid == own_pid || window.layer != 0 {
+            continue;
+        }
+        let path = application_path(window.pid).unwrap_or_default();
+        if path.is_empty()
+            || candidates
+                .iter()
+                .any(|candidate: &crate::avoidance::Candidate| {
+                    crate::avoidance::same_app(&candidate.path, &path)
+                })
+        {
+            continue;
+        }
+        let name = if window.name.is_empty() {
+            Path::new(&path)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("应用")
+                .to_owned()
+        } else {
+            window.name
+        };
+        candidates.push(crate::avoidance::Candidate {
+            browser: is_browser_application(&name, &path),
+            path,
+            name,
+            title: window.title,
+        });
+    }
+    candidates.sort_by_key(|candidate| candidate.name.to_lowercase());
+    Ok(candidates)
+}
+
+fn avoidance_for_application(
+    pid: i32,
+    name: &str,
+    path: &str,
+    settings: &crate::model::Settings,
+    own_pid: i32,
+    island: Bounds,
+    windows: &[NativeWindow],
+) -> Option<bool> {
+    if !settings.browser_minimal {
+        return Some(false);
+    }
+    if pid == own_pid {
+        return None;
+    }
+    let registered = crate::avoidance::contains_app(&settings.avoid_apps, path);
+    let browser = settings.avoid_browsers && is_browser_application(name, path);
+    if !registered && !browser {
+        return Some(false);
+    }
+    Some(windows.iter().any(|window| {
+        window.pid == pid
+            && window.layer == 0
+            && window_overlaps_island(window.bounds, island)
+    }))
+}
+
+pub fn browser_at_top(settings: &crate::model::Settings) -> Option<bool> {
+    if !settings.browser_minimal {
+        *AVOIDANCE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        return Some(false);
+    }
+    if let Some((sampled, result)) = *AVOIDANCE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+        if sampled.elapsed() < Duration::from_millis(120) {
+            return result;
+        }
+    }
+    let (pid, name, path) = frontmost_application()?;
+    let (left, top, width, height) = window_frame()?;
+    let canvas = Bounds {
+        left: left.round() as i32,
+        top: top.round() as i32,
+        right: (left + width).round() as i32,
+        bottom: (top + height).round() as i32,
+    };
+    let island = island_hit_bounds(canvas, settings.dock);
+    let result = avoidance_for_application(
+        pid,
+        &name,
+        &path,
+        settings,
+        std::process::id() as i32,
+        island,
+        &onscreen_windows(),
+    );
+    *AVOIDANCE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((Instant::now(), result));
+    result
 }
 
 pub fn output_volume() -> Option<(u32, bool)> {
@@ -554,4 +868,127 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 unsafe extern "C" {
     #[link_name = "geteuid"]
     fn libc_geteuid() -> u32;
+}
+
+#[cfg(test)]
+mod avoidance_tests {
+    use super::*;
+
+    #[test]
+    fn island_hit_bounds_follow_horizontal_and_side_docks() {
+        let canvas = Bounds {
+            left: 0,
+            top: 24,
+            right: crate::app::CANVAS_W as i32,
+            bottom: 24 + crate::app::WIN_H as i32,
+        };
+        let top = island_hit_bounds(canvas, crate::model::Dock::Top);
+        assert_eq!(top.top, 24);
+        assert_eq!(top.bottom, 24 + crate::app::BAR_H as i32);
+        assert!(window_overlaps_island(
+            Bounds { left: 0, top: 24, right: 1920, bottom: 1080 },
+            top,
+        ));
+        assert!(!window_overlaps_island(
+            Bounds { left: 0, top: 200, right: 1920, bottom: 1080 },
+            top,
+        ));
+
+        let canvas = Bounds {
+            left: 0,
+            top: 0,
+            right: crate::side_dock::SIDE_W as i32,
+            bottom: crate::side_dock::SIDE_H as i32,
+        };
+        let left = island_hit_bounds(canvas, crate::model::Dock::Left);
+        assert_eq!(left.left, 0);
+        assert!(left.right > left.left);
+        assert!(window_overlaps_island(
+            Bounds { left: 0, top: 0, right: 1920, bottom: 1080 },
+            left,
+        ));
+    }
+
+    #[test]
+    fn common_macos_browser_bundles_are_recognized() {
+        for (name, path) in [
+            ("Safari", "/Applications/Safari.app"),
+            ("Google Chrome", "/Applications/Google Chrome.app"),
+            ("Firefox", "/Applications/Firefox.app"),
+            ("Arc", "/Applications/Arc.app"),
+            ("Microsoft Edge", "/Applications/Microsoft Edge.app"),
+        ] {
+            assert!(is_browser_application(name, path), "{name}");
+        }
+        assert!(!is_browser_application("微信", "/Applications/WeChat.app"));
+    }
+
+    #[test]
+    fn frontmost_app_only_avoids_when_enabled_matched_and_overlapping() {
+        let mut settings = crate::model::Settings::default();
+        let window = NativeWindow {
+            pid: 42,
+            layer: 0,
+            name: "Google Chrome".into(),
+            title: "网页".into(),
+            bounds: Bounds { left: 0, top: 0, right: 1920, bottom: 1080 },
+        };
+        let island = Bounds { left: 700, top: 24, right: 900, bottom: 70 };
+        assert_eq!(
+            avoidance_for_application(
+                42,
+                "Google Chrome",
+                "/Applications/Google Chrome.app",
+                &settings,
+                7,
+                island,
+                &[window.clone()],
+            ),
+            Some(false),
+            "总开关关闭时不避让",
+        );
+        settings.browser_minimal = true;
+        assert_eq!(
+            avoidance_for_application(
+                42,
+                "Google Chrome",
+                "/Applications/Google Chrome.app",
+                &settings,
+                7,
+                island,
+                &[window.clone()],
+            ),
+            Some(true),
+            "前台浏览器遮住岛时应避让",
+        );
+        assert_eq!(
+            avoidance_for_application(
+                42,
+                "Google Chrome",
+                "/Applications/Google Chrome.app",
+                &settings,
+                42,
+                island,
+                &[window],
+            ),
+            None,
+            "前台是岛仔自身时保持当前避让状态",
+        );
+    }
+
+    #[test]
+    #[ignore = "需要当前 macOS 桌面有可见窗口"]
+    fn live_onscreen_window_metadata_is_available() {
+        let candidates = avoidance_candidates().unwrap();
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| !candidate.path.is_empty()));
+        assert!(
+            candidates.iter().any(|candidate| candidate.browser),
+            "当前桌面应至少识别出一个可见浏览器：{:?}",
+            candidates
+                .iter()
+                .map(|candidate| (&candidate.name, &candidate.path))
+                .collect::<Vec<_>>()
+        );
+    }
 }

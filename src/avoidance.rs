@@ -28,7 +28,8 @@ impl Picker {
         let ctx=ctx.clone();
         std::thread::spawn(move||{
             #[cfg(windows)] let result=crate::system::avoidance_windows();
-            #[cfg(not(windows))] let result=Err("应用选择仅支持 Windows".into());
+            #[cfg(target_os="macos")] let result=crate::macos::avoidance_candidates();
+            #[cfg(all(not(windows),not(target_os="macos")))] let result=Err("当前平台暂不支持应用选择".into());
             let _=tx.send(result);ctx.request_repaint();
         });
     }
