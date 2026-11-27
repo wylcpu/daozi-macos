@@ -70,8 +70,21 @@ const SHIMMER: Duration = Duration::from_millis(90);
 fn tab_w() -> f32 {
     (RIGHT - LEFT - TAB_GAP * 4.) / 5.
 }
+fn tab_w_for(count: usize) -> f32 {
+    if count == 5 {
+        return tab_w();
+    }
+    (RIGHT - LEFT - TAB_GAP * count.saturating_sub(1) as f32) / count.max(1) as f32
+}
 fn top_card(i: usize) -> [f32; 4] {
     let w = (RIGHT - LEFT - CARD_GAP * 2.) / 3.;
+    [LEFT + i as f32 * (w + CARD_GAP), TOP_Y, w, TOP_H]
+}
+fn overview_top_card(i: usize, count: usize) -> [f32; 4] {
+    if count == 3 {
+        return top_card(i);
+    }
+    let w = (RIGHT - LEFT - CARD_GAP * (count.saturating_sub(1) as f32)) / count.max(1) as f32;
     [LEFT + i as f32 * (w + CARD_GAP), TOP_Y, w, TOP_H]
 }
 fn io_card(i: usize) -> [f32; 4] {
@@ -87,6 +100,19 @@ fn overview_card(view: View) -> [f32; 4] {
         View::Disk => io_card(0),
         View::Network => io_card(1),
     }
+}
+fn overview_views(r: &Reading) -> Vec<View> {
+    if r.show_gpu() {
+        vec![View::Cpu, View::Gpu, View::Memory]
+    } else {
+        vec![View::Cpu, View::Memory]
+    }
+}
+fn detail_views(r: &Reading) -> Vec<View> {
+    View::DETAILS
+        .into_iter()
+        .filter(|view| *view != View::Gpu || r.show_gpu())
+        .collect()
 }
 /// 测试用：总览卡片中心、详情页签中心、返回按钮中心。
 #[cfg_attr(not(test), allow(dead_code))]
@@ -498,7 +524,12 @@ impl App {
     }
     /// 岛内当前显示的页面：先看岛内的临时选择，没有就用设置里的。
     fn performance_view(&self) -> View {
-        self.performance.view.unwrap_or(self.settings.performance_view)
+        let view = self.performance.view.unwrap_or(self.settings.performance_view);
+        if view == View::Gpu && !self.performance.latest.show_gpu() {
+            View::Overview
+        } else {
+            view
+        }
     }
 
     /// 当前详情页的程序列表还能往下滚几行；不是 CPU、内存详情或列表不满一屏时为 0。
@@ -863,7 +894,10 @@ impl App {
             let layer = c.faded(depth * depth).scaled(209.5, PAGE_H / 2., 0.96 + 0.04 * depth);
             let layer = if view == View::Overview { layer.ghost() } else { layer };
             // 退回总览的途中仍然画上一个详情页。
-            let shown = if view == View::Overview { self.performance.last_detail } else { view };
+            let mut shown = if view == View::Overview { self.performance.last_detail } else { view };
+            if shown == View::Gpu && !r.show_gpu() {
+                shown = View::Cpu;
+            }
             self.performance_detail(&layer, shown, &r, t);
         }
         if view != View::Overview {
@@ -891,8 +925,15 @@ impl App {
             (if integrated { "共享显存" } else { "专用显存" }, capacity(vram)),
             ("可用", r.memory.map_or_else(|| "—".into(), |_| bytes(total.saturating_sub(used)))),
         ];
-        for (i, view) in [View::Cpu, View::Gpu, View::Memory].into_iter().enumerate() {
-            let [x, y, w, _] = top_card(i);
+        let cards = overview_views(r);
+        for (slot, view) in cards.iter().copied().enumerate() {
+            let i = match view {
+                View::Cpu => 0,
+                View::Gpu => 1,
+                View::Memory => 2,
+                _ => continue,
+            };
+            let [x, y, w, _] = overview_top_card(slot, cards.len());
             let color = COLORS[i];
             let value = metric(r, i);
             let hover = self.overview_card_frame(c, overview_card(view), view, view.key(), color);
@@ -1056,17 +1097,18 @@ impl App {
     /// 页签条：五个页签，每个带名称、读数和一分钟迷你曲线；选中底板随页签滑动。
     fn performance_tabs(&mut self, c: &Card, view: View) -> f32 {
         let ctx = c.ui.ctx().clone();
-        let current = View::DETAILS.iter().position(|v| *v == view).unwrap_or(0);
-        let slide = ctx.animate_value_with_time(egui::Id::new("performance-tab-slide"), current as f32, 0.22);
         let r = self.performance.latest.clone();
-        let w = tab_w();
+        let tabs = detail_views(&r);
+        let current = tabs.iter().position(|v| *v == view).unwrap_or(0);
+        let slide = ctx.animate_value_with_time(egui::Id::new("performance-tab-slide"), current as f32, 0.22);
+        let w = tab_w_for(tabs.len());
         let sx = LEFT + slide * (w + TAB_GAP);
         let accent = view_color(view);
         c.fill(sx, TAB_Y, w, TAB_H, 9., RAISED);
         c.stroke(sx + 0.5, TAB_Y + 0.5, w - 1., TAB_H - 1., 8.5, 1., alpha(accent, 0.5));
         // 选中页签只在自己底边亮一道线，不往下面的大环上漏光。
         c.seg((sx + 12., TAB_Y + TAB_H - 1.), (sx + w - 12., TAB_Y + TAB_H - 1.), 1.2, alpha(accent, 0.7));
-        for (i, tab) in View::DETAILS.into_iter().enumerate() {
+        for (i, tab) in tabs.into_iter().enumerate() {
             let x = LEFT + i as f32 * (w + TAB_GAP);
             let color = view_color(tab);
             let response = c.hit(x, TAB_Y, w, TAB_H, ("performance-view", i));
@@ -1431,6 +1473,10 @@ impl App {
         use crate::extras::{setting_row, settings_card, settings_label, settings_segmented};
         use crate::settings_theme::color as theme_color;
         let ctx = ui.ctx().clone();
+        let show_gpu = self.performance.latest.show_gpu();
+        if !show_gpu && self.settings.performance_view == View::Gpu {
+            self.settings.performance_view = View::Overview;
+        }
         settings_label(ui, "常驻显示");
         settings_card(ui, |ui| {
             setting_row(ui, "显示在岛上", "点击指标可展开系统性能", &mut self.settings.show_performance);
@@ -1473,7 +1519,7 @@ impl App {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(6., 6.);
                             ui.add_space(4.);
-                            for m in Metric::ALL {
+                            for m in Metric::ALL.into_iter().filter(|metric| show_gpu || !metric.is_gpu()) {
                                 let checked = self.settings.performance_metrics & m.bit() != 0;
                                 if metric_chip(ui, m.label(), metric_color(m), checked).clicked() {
                                     self.settings.performance_metrics ^= m.bit();
@@ -1498,7 +1544,12 @@ impl App {
         });
         settings_label(ui, "展开页");
         settings_card(ui, |ui| {
-            settings_segmented(ui, &mut self.settings.performance_view, &View::ALL.map(|v| (v, v.label())), 44.);
+            let views: Vec<View> = View::ALL
+                .into_iter()
+                .filter(|view| *view != View::Gpu || show_gpu)
+                .collect();
+            let options: Vec<(View, &str)> = views.into_iter().map(|view| (view, view.label())).collect();
+            settings_segmented(ui, &mut self.settings.performance_view, &options, 44.);
             crate::extras::settings_hint(ui, "展开时先显示的页面。总览里点卡片进入详情，标题旁的返回键回到总览；移开鼠标收起后再展开，仍停在刚才的页面，点常驻指标或切到其它页面后从这里开始。硬件未提供的读数显示为 —。");
             crate::extras::settings_hint(ui, "程序排行和分区容量只在展开页打开时统计，收起后停止。");
         });
@@ -1543,6 +1594,19 @@ fn metric_chip(ui: &mut egui::Ui, label: &str, color: Color32, on: bool) -> egui
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_gpu_removes_card_and_detail_tab() {
+        let unknown = Reading::default();
+        assert!(unknown.show_gpu(), "首次采样前不突然隐藏");
+        assert!(overview_views(&unknown).contains(&View::Gpu));
+        assert!(detail_views(&unknown).contains(&View::Gpu));
+
+        let missing = Reading { gpu_available: Some(false), ..Default::default() };
+        assert!(!missing.show_gpu());
+        assert!(!overview_views(&missing).contains(&View::Gpu));
+        assert!(!detail_views(&missing).contains(&View::Gpu));
+    }
 
     /// 可用 = 缓存 + 空闲，悬停、图例和左栏三处用的是同一组数，任何读数下都对得上。
     #[test]

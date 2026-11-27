@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.71"
+version = "0.6.72"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -78,6 +78,7 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "defa
 objc = "0.2"
 core-foundation = "0.9"
 core-graphics = { version = "0.23", features = ["link"] }
+macmon = { version = "0.12.1", default-features = false }
 imap = "2.4"
 imap-proto = "0.10.2"
 native-tls = "0.2"

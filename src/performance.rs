@@ -30,6 +30,9 @@ impl Metric {
         }
     }
     pub(crate) fn bit(self) -> u16 { 1 << self as u16 }
+    pub(crate) fn is_gpu(self) -> bool {
+        matches!(self, Self::Gpu | Self::Vram | Self::GpuTemp)
+    }
     pub(crate) fn rate_label(self) -> Option<&'static str> {
         match self {
             Self::Download => Some("↓"),
@@ -201,6 +204,10 @@ pub(crate) struct Volume {
 pub(crate) struct Reading {
     pub cpu: Option<f32>,
     pub gpu: Option<f32>,
+    /// `None` 表示还没有完成检测；`Some(false)` 表示系统没有提供 GPU。
+    pub gpu_available: Option<bool>,
+    pub gpu_cores: Option<u32>,
+    pub gpu_mhz: Option<f32>,
     pub memory: Option<(u64, u64)>,
     pub gpu_name: String,
     pub gpu_temp: Option<f32>,
@@ -259,6 +266,9 @@ impl Reading {
         self.memory
             .filter(|&(_, total)| total > 0)
             .map(|(used, total)| 100. * used as f32 / total as f32)
+    }
+    pub fn show_gpu(&self) -> bool {
+        self.gpu_available != Some(false)
     }
 }
 

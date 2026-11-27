@@ -534,7 +534,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daozai"
-version = "0.6.71"
+version = "0.6.72"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -552,6 +552,7 @@ dependencies = [
  "imap",
  "imap-proto",
  "keyring",
+ "macmon",
  "mailparse",
  "memmap2",
  "native-tls",
@@ -1667,6 +1668,18 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "macmon"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c776045ed8b3d64d3d325c9521f0adadfd972b89a76b5f8aeb41d1aebb3f5fb"
+dependencies = [
+ "core-foundation 0.10.1",
+ "libc",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mailparse"

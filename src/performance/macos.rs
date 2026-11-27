@@ -285,7 +285,66 @@ fn disk_counters() -> Option<(u64, u64)> {
     found.then_some((read, write))
 }
 
+fn gpu_identity(text: &str) -> Option<(String, Option<u32>)> {
+    let string_value = |line: &str, key: &str| -> Option<String> {
+        let start = line.find(&format!("\"{key}\" = \""))? + key.len() + 5;
+        let tail = &line[start..];
+        let end = tail.find('"')?;
+        let value = tail[..end].trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    let number = |line: &str, key: &str| {
+        let key = format!("\"{key}\"");
+        let start = line.find(&key)? + key.len();
+        let tail = line[start..].trim_start();
+        let tail = tail.strip_prefix('=')?.trim_start();
+        tail
+            .trim_start_matches('"')
+            .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+            .next()
+            .and_then(|value| value.parse::<f32>().ok())
+    };
+    let mut accelerator = false;
+    let mut model = None;
+    let mut cores = None;
+    for line in text.lines() {
+        if line.contains("<class ") && line.contains("Accelerator") {
+            accelerator = true;
+        }
+        if model.is_none() {
+            model = string_value(line, "model");
+        }
+        if cores.is_none() {
+            cores = number(line, "gpu-core-count").map(|value| value.max(0.0) as u32);
+        }
+    }
+    if !accelerator {
+        return None;
+    }
+    let name = model
+        .or_else(|| {
+            let cpu = cpu_name();
+            (!cpu.is_empty()).then_some(cpu)
+        })
+        .unwrap_or_else(|| "Apple".into());
+    let mut gpu_name = if name.to_ascii_lowercase().contains("gpu")
+        || name.to_ascii_lowercase().contains("graphics")
+    {
+        name
+    } else {
+        format!("{name} GPU")
+    };
+    let cores = cores.filter(|cores| *cores > 0);
+    if let Some(cores) = cores {
+        gpu_name.push_str(&format!(" · {cores} 核"));
+    }
+    Some((gpu_name, cores))
+}
+
 fn gpu(reading: &mut Reading) {
+    if reading.gpu_available != Some(true) {
+        reading.gpu_available = Some(false);
+    }
     let Some(text) = output(
         "/usr/sbin/ioreg",
         &["-r", "-d", "1", "-c", "IOAccelerator", "-k", "PerformanceStatistics"],
@@ -293,8 +352,11 @@ fn gpu(reading: &mut Reading) {
         return;
     };
     let number = |line: &str, key: &str| {
-        let start = line.find(&format!("\"{key}\"="))? + key.len() + 3;
-        line[start..]
+        let key = format!("\"{key}\"");
+        let start = line.find(&key)? + key.len();
+        let tail = line[start..].trim_start();
+        let tail = tail.strip_prefix('=')?.trim_start();
+        tail
             .trim_start_matches('"')
             .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
             .next()
@@ -312,20 +374,38 @@ fn gpu(reading: &mut Reading) {
             shared_used = Some(shared_used.map_or(value, |current: f32| current.max(value)));
         }
     }
-    reading.gpu = utilization.map(|value| value.clamp(0.0, 100.0));
-    let name = cpu_name();
-    reading.gpu_name = if name.is_empty() { "Apple GPU".into() } else { format!("{name} GPU") };
+    let Some((gpu_name, cores)) = gpu_identity(&text) else { return; };
+    reading.gpu_available = Some(true);
+    reading.gpu_cores = cores;
+    if reading.gpu.is_none() {
+        reading.gpu = utilization.map(|value| value.clamp(0.0, 100.0));
+    }
+    reading.gpu_name = gpu_name;
     if let (Some(used), Some(total)) = (shared_used, scalar("hw.memsize")) {
         reading.shared_memory = Some((used as u64, total));
     }
 }
 
-#[derive(Default)]
 pub(super) struct Sampler {
     network: Option<(Instant, HashMap<String, (u64, u64)>)>,
     disk: Option<(Instant, (u64, u64))>,
     cpu: Option<CpuTicks>,
     cores: Option<Vec<CpuTicks>>,
+    enhanced: Option<macmon::Sampler>,
+    enhanced_retry: Option<Instant>,
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self {
+            network: None,
+            disk: None,
+            cpu: None,
+            cores: None,
+            enhanced: macmon::Sampler::new().ok(),
+            enhanced_retry: None,
+        }
+    }
 }
 
 impl Sampler {
@@ -363,9 +443,36 @@ impl Sampler {
             reading.cores = vec![reading.cpu.unwrap_or(ps_cpu); cores];
         }
         reading.cpu.get_or_insert(ps_cpu.clamp(0.0, 100.0));
+        if self.enhanced.is_none()
+            && self.enhanced_retry.is_none_or(|retry| now >= retry)
+        {
+            self.enhanced = macmon::Sampler::new().ok();
+            self.enhanced_retry = Some(now + std::time::Duration::from_secs(30));
+        }
+        if let Some(enhanced) = &mut self.enhanced {
+            match enhanced.get_metrics_now() {
+                Ok(metrics) => {
+                    reading.gpu_available = Some(true);
+                    reading.gpu = Some((metrics.gpu_scaled_ratio * 100.0).clamp(0.0, 100.0));
+                    if metrics.gpu_freq_mhz > 0 {
+                        reading.gpu_mhz = Some(metrics.gpu_freq_mhz as f32);
+                    }
+                    reading.gpu_temp = metrics.temp.gpu_temp_avg;
+                }
+                Err(_) => {
+                    self.enhanced = None;
+                    self.enhanced_retry = Some(now + std::time::Duration::from_secs(30));
+                }
+            }
+        }
         gpu(&mut reading);
-        if reading.gpu_name.is_empty() {
-            reading.gpu_name = cpu_name();
+        if reading.gpu_available == Some(true) && reading.gpu_name.is_empty() {
+            let name = cpu_name();
+            reading.gpu_name = if name.is_empty() {
+                "Apple GPU".into()
+            } else {
+                format!("{name} GPU")
+            };
         }
         reading.gpu_engines = Vec::new();
 
@@ -413,20 +520,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gpu_identity_requires_an_accelerator_and_reports_core_count() {
+        assert!(gpu_identity("").is_none());
+        let accelerator = r#"
+            +-o AGXAcceleratorG18G <class AGXAcceleratorG18G, id 1>
+              {
+                "model" = "Apple M6"
+                "gpu-core-count" = 12
+              }
+        "#;
+        assert_eq!(
+            gpu_identity(accelerator),
+            Some(("Apple M6 GPU · 12 核".into(), Some(12)))
+        );
+    }
+
+    #[test]
     fn macos_system_metrics_are_available_without_opening_process_details() {
         let mut sampler = Sampler::default();
         let first = sampler.read(Instant::now(), false);
         assert!(first.memory.is_some(), "内存总量与已用量应可读取");
         assert!(!first.volumes.is_empty(), "至少应识别系统磁盘");
 
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::thread::sleep(std::time::Duration::from_millis(1_050));
         let second = sampler.read(Instant::now(), false);
         let cpu = second.cpu.expect("系统总 CPU 不应依赖展开页进程排行");
         assert!((0.0..=100.0).contains(&cpu));
         assert!(!second.cores.is_empty(), "应读取逻辑处理器负载");
         assert!(second.disk[0].is_some() && second.disk[1].is_some(), "磁盘读写应可读取");
         assert!(second.network[0].is_some() && second.network[1].is_some(), "网络收发应可读取");
+        assert_eq!(second.gpu_available, Some(true), "应识别到 GPU 硬件");
         assert!(second.gpu.is_some(), "应读取 GPU 利用率");
+        assert!(second.gpu_name.contains("GPU"), "GPU 名称应显示为图形处理器");
+        println!(
+            "gpu={} cores={:?} usage={:?} freq={:?}",
+            second.gpu_name, second.gpu_cores, second.gpu, second.gpu_mhz
+        );
         assert!(second.by_cpu.is_empty(), "未打开详情时不应构建进程排行");
     }
 }
