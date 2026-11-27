@@ -59,10 +59,12 @@ impl Widget for SelectableLabel {
         });
 
         if ui.is_rect_visible(response.rect) {
-            let text_pos = ui
+            let inner_rect = rect.shrink2(button_padding);
+            let mut text_pos = ui
                 .layout()
-                .align_size_within_rect(galley.size(), rect.shrink2(button_padding))
+                .align_size_within_rect(galley.size(), inner_rect)
                 .min;
+            text_pos.y = inner_rect.center().y - galley.mesh_bounds.center().y;
 
             let visuals = ui.style().interact_selectable(&response, selected);
 

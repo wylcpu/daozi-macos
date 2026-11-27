@@ -656,6 +656,10 @@ impl TextEdit<'_> {
             .align_size_within_rect(galley.size(), rect)
             .intersect(rect) // limit pos to the response rect area
             .min;
+        if align.0[1] == Align::Center {
+            // 单行输入框按字形可见范围居中，避免字体上下留白把文字推偏。
+            galley_pos.y = rect.center().y - galley.mesh_bounds.center().y;
+        }
         let align_offset = rect.left() - galley_pos.x;
 
         // Visual clipping for singleline text editor with text larger than width
@@ -713,10 +717,13 @@ impl TextEdit<'_> {
                         hint_text_font_id,
                     )
                 };
-                let galley_pos = align
+                let mut galley_pos = align
                     .align_size_within_rect(galley.size(), rect)
                     .intersect(rect)
                     .min;
+                if align.0[1] == Align::Center {
+                    galley_pos.y = rect.center().y - galley.mesh_bounds.center().y;
+                }
                 painter.galley(galley_pos, galley, hint_text_color);
             }
 

@@ -365,13 +365,16 @@ impl Widget for Button<'_> {
             }
 
             if let Some(galley) = galley {
+                let inner_rect = rect.shrink2(button_padding);
                 let mut text_pos = ui
                     .layout()
-                    .align_size_within_rect(galley.size(), rect.shrink2(button_padding))
+                    .align_size_within_rect(galley.size(), inner_rect)
                     .min;
                 if image.is_some() || shortcut_galley.is_some() {
                     text_pos.x = cursor_x;
                 }
+                // 居中的是字形实际可见范围，而不是包含字体上下留白的行框。
+                text_pos.y = inner_rect.center().y - galley.mesh_bounds.center().y;
                 ui.painter().galley(text_pos, galley, visuals.text_color());
             }
 
@@ -382,9 +385,12 @@ impl Widget for Button<'_> {
                 } else {
                     ui.layout().with_cross_align(Align::Max)
                 };
-                let shortcut_text_pos = layout
-                    .align_size_within_rect(shortcut_galley.size(), rect.shrink2(button_padding))
+                let inner_rect = rect.shrink2(button_padding);
+                let mut shortcut_text_pos = layout
+                    .align_size_within_rect(shortcut_galley.size(), inner_rect)
                     .min;
+                shortcut_text_pos.y =
+                    inner_rect.center().y - shortcut_galley.mesh_bounds.center().y;
                 ui.painter().galley(
                     shortcut_text_pos,
                     shortcut_galley,

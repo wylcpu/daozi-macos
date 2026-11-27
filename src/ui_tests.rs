@@ -11259,6 +11259,27 @@ fn macos_notification_settings_do_not_show_windows_instructions(){
     assert!(!texts.iter().any(|t|t.contains("Windows")),"macOS 设置不应显示 Windows 描述");
 }
 
+#[test]
+fn native_buttons_center_visible_glyph_bounds_vertically(){
+    for (scale,label) in [(1.0,"恢复默认"),(1.25,"检查更新"),(1.5,"Test"),(2.0,"连接…")]{
+        let ctx=egui::Context::default();crate::theme::load_fonts(&ctx);
+        let mut button_rect=None;
+        let output=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(320.0,100.0))),
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(scale),..Default::default()})).collect(),..Default::default()},|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{
+                let response=ui.add(egui::Button::new(label).min_size(egui::vec2(120.0,40.0)));
+                button_rect=Some(response.rect);
+            });
+        });
+        let text=output.shapes.iter().find_map(|shape|match &shape.shape{
+            egui::Shape::Text(text) if text.galley.text()==label=>Some(text.visual_bounding_rect()),
+            _=>None,
+        }).unwrap_or_else(||panic!("未绘制按钮文字：{label}"));
+        let button=button_rect.unwrap();
+        assert!((text.center().y-button.center().y).abs()<0.6,"缩放 {scale}：按钮文字可见中心 {:?} 偏离按钮中心 {:?}",text.center(),button.center());
+    }
+}
+
 
 #[test]
 fn performance_badge_opens_overview_and_drills_into_details() {
