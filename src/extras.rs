@@ -884,6 +884,34 @@ mod tests {
     }
 
     #[test]
+    fn selected_sidebar_text_uses_visible_vertical_center(){
+        for scale in [1.0,1.25,1.5,2.0]{
+            let ctx=egui::Context::default();crate::theme::load_fonts(&ctx);
+            let output=ctx.run(egui::RawInput{
+                screen_rect:Some(Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(200.0,60.0))),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(scale),..Default::default()})).collect(),
+                ..Default::default()
+            },|ctx|{
+                egui::CentralPanel::default().show(ctx,|ui|{
+                    settings_sidebar_row(ui,"通用",egui::include_image!("../assets/settings-icons/system/general.svg"),30.0,true,false,
+                        #[cfg(feature="sdk-js")] None);
+                });
+            });
+            let text=output.shapes.iter().find_map(|shape|match &shape.shape{
+                egui::Shape::Text(text) if text.galley.text()=="通用"=>Some(text.visual_bounding_rect()),
+                _=>None,
+            }).expect("侧栏文字应可见");
+            let row=output.shapes.iter().find_map(|shape|match &shape.shape{
+                egui::Shape::Rect(rect) if rect.rect.contains(text.center())&&rect.rect.width()>140.0&&(25.0..=35.0).contains(&rect.rect.height())=>Some(rect.rect),
+                _=>None,
+            }).expect("选中背景应可见");
+            assert!((text.center().y-row.center().y).abs()<0.6,"缩放 {scale}：侧栏文字中心 {:?} 偏离选中背景中心 {:?}",text.center(),row.center());
+            let icon_center=egui::pos2(row.left()+21.0,row.center().y);
+            assert!((text.center().y-icon_center.y).abs()<0.6,"缩放 {scale}：侧栏文字中心 {:?} 未与图标中心 {:?} 对齐",text.center(),icon_center);
+        }
+    }
+
+    #[test]
     fn bluetooth_notice_uses_real_connection_and_battery_data(){
         assert_eq!(bluetooth_notice_content("OpenMove by Shokz · 电量 80%"),("OpenMove by Shokz","已连接",Some(80)));
         assert_eq!(bluetooth_notice_content("耳机"),("耳机","已连接",None));
@@ -1592,9 +1620,12 @@ fn settings_sidebar_row(
     } else {
         settings_color(&ctx, Color32::from_gray(225), Color32::from_gray(55))
     };
-    ui.painter().with_clip_rect(rect.shrink2(egui::vec2(5.0,0.0))).text(
-        egui::pos2(rect.left()+40.0,rect.center().y), egui::Align2::LEFT_CENTER, name,
-        egui::FontId::proportional(13.0), color,
+    let painter=ui.painter().with_clip_rect(rect.shrink2(egui::vec2(5.0,0.0)));
+    let galley=painter.layout_no_wrap(name.to_owned(),egui::FontId::proportional(13.0),color);
+    painter.galley(
+        egui::pos2(rect.left()+40.0,rect.center().y-galley.mesh_bounds.center().y),
+        galley,
+        color,
     );
     response
 }
