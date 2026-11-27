@@ -302,6 +302,9 @@ impl App {
             title.as_str(),
             "系统音量" | "大写锁定" | "键盘输入语言" | "网络连接" | "电源已连接" | "已切换电池供电" | "蓝牙设备"
         );
+        if !transient && self.pet.reaction.is_none() {
+            self.pet.react(PetState::Surprised);
+        }
         let a = Alert {
             source: AlertSource::Internal,
             title,
@@ -316,6 +319,9 @@ impl App {
         self.enqueue_alert(a, system);
     }
     pub(crate) fn meeting_alert(&mut self, meeting: crate::mail::Meeting, source: String, page: usize) {
+        if self.pet.reaction.is_none() {
+            self.pet.react(PetState::Surprised);
+        }
         self.enqueue_alert(Alert {
             source: AlertSource::Internal,
             title: "会议提醒".into(), body: format!("{} · {} · {}", meeting.title, meeting.at, source),

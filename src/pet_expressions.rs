@@ -50,7 +50,7 @@ pub(crate) struct Expressions {
     wait:f32,
     cooldown:f32,
     hovered:bool,
-    next:[usize;4],
+    next:[usize;5],
     /// 正在播放的表情序列图；换表情或换皮肤时原地替换内容，播完释放。
     sheet:Option<(Expression,Option<Palette>,TextureHandle)>,
     #[cfg(feature="sdk-js")]
@@ -59,7 +59,7 @@ pub(crate) struct Expressions {
 
 impl Default for Expressions {
     fn default()->Self {
-        Self{clip:None,wait:8.0,cooldown:0.0,hovered:false,next:[0;4],sheet:None,
+        Self{clip:None,wait:3.5,cooldown:0.0,hovered:false,next:[0;5],sheet:None,
             #[cfg(feature="sdk-js")]
             plugin_sheets:None,
         }
@@ -88,7 +88,7 @@ impl Expressions {
     pub fn current(&self)->Option<Expression> {self.clip.map(|clip|clip.0)}
     pub fn play(&mut self,expression:Expression) {self.clip=Some((expression,0.0));}
     pub fn play_at(&mut self,expression:Expression,time:f32) {self.clip=Some((expression,time));}
-    pub fn clear(&mut self) {self.clip=None;self.wait=8.0;self.cooldown=0.0;self.hovered=false;self.sheet=None;}
+    pub fn clear(&mut self) {self.clip=None;self.wait=3.5;self.cooldown=0.0;self.hovered=false;self.sheet=None;}
     fn choose(&mut self,bucket:usize,pool:&[Expression])->Expression {
         let expression=pool[self.next[bucket]%pool.len()];self.next[bucket]=self.next[bucket].wrapping_add(1);expression
     }
@@ -97,6 +97,7 @@ impl Expressions {
         let expression=match state {
             PetState::Happy=>self.choose(2,&[Praised,Smug,Delighted,Giggle]),
             PetState::Satisfied=>self.choose(3,&[Heart,Delighted]),
+            PetState::Surprised=>self.choose(4,&[Search,Peek,Scan]),
             _=>return 2.6,
         };
         self.play(expression);expression.duration()
@@ -104,21 +105,21 @@ impl Expressions {
     pub fn step(&mut self,state:PetState,dt:f32,visible:bool) {
         use Expression::*;
         if !visible {return;}
-        if !matches!(state,PetState::Awake|PetState::Curious|PetState::Happy|PetState::Satisfied) {self.clear();return;}
+        if !matches!(state,PetState::Awake|PetState::Curious|PetState::Happy|PetState::Satisfied|PetState::Surprised) {self.clear();return;}
         self.cooldown=(self.cooldown-dt).max(0.0);
         if let Some((expression,time))=&mut self.clip {
             *time+=dt;
-            if *time>=expression.duration() {self.clip=None;self.sheet=None;self.wait=22.0+(self.next[0]%4) as f32*3.0;}
+            if *time>=expression.duration() {self.clip=None;self.sheet=None;self.wait=8.0+(self.next[0]%5) as f32*1.8;}
         }
         let hovered=state==PetState::Curious;
         if hovered && !self.hovered && self.cooldown<=0.0 && self.clip.is_none() {
-            let expression=self.choose(1,&[Wink,Blush,SideGlance,ShyPeek]);self.play(expression);self.cooldown=18.0;
+            let expression=self.choose(1,&[Wink,Blush,SideGlance,ShyPeek,Giggle,Heart]);self.play(expression);self.cooldown=6.0;
         }
         self.hovered=hovered;
         if state==PetState::Awake && self.clip.is_none() && crate::bar_layout::animations_enabled() {
             self.wait-=dt;
             if self.wait<=0.0 {
-                let expression=self.choose(0,&[Scan,Delighted,Peek,Smug,Search,Giggle,Praised,ShyPeek]);self.play(expression);
+                let expression=self.choose(0,&Expression::ALL);self.play(expression);
             }
         }
     }
@@ -151,7 +152,7 @@ mod tests {
         let mut expressions=Expressions::default();let mut seen=std::collections::HashSet::new();
         let idle_animations=crate::bar_layout::animations_enabled();
         if idle_animations {
-            for _ in 0..8 {
+            for _ in 0..14 {
                 for _ in 0..400 {
                     expressions.step(PetState::Awake,0.1,true);
                     if expressions.current().is_some(){break;}
@@ -162,7 +163,7 @@ mod tests {
                     if expressions.current().is_none(){break;}
                 }
                 assert!(expressions.current().is_none(),"日常表情应按时结束");
-                for _ in 0..210 {expressions.step(PetState::Awake,0.1,true);assert!(expressions.current().is_none(),"日常动作之间应有安静间隔");}
+                for _ in 0..70 {expressions.step(PetState::Awake,0.1,true);assert!(expressions.current().is_none(),"日常动作之间应有安静间隔");}
             }
         }else{
             for _ in 0..400 {

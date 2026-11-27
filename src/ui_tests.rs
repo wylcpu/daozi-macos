@@ -4933,6 +4933,16 @@ fn mascot_feedback_plays_beside_notice_and_respects_switches(){
 }
 
 #[test]
+fn mascot_surprise_reaction_does_not_override_direct_feedback(){
+    use crate::extras::PetState;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
+    h.app.alert("新邮件","收到一封测试邮件",7,false);h.frame(vec![]);
+    assert_eq!(h.app.pet_state(),PetState::Surprised);
+    h.app.drink_water();h.app.alert("待办到时间了","测试提醒",4,false);h.frame(vec![]);
+    assert_eq!(h.app.pet_state(),PetState::Satisfied,"已有直接反馈时不能被普通提醒覆盖");
+}
+
+#[test]
 #[ignore = "按需导出吉祥物的实际渲染画面"]
 fn mascot_expression_gallery(){
     use crate::extras::PetState;

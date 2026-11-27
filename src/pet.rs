@@ -11,6 +11,7 @@ pub(crate) enum PetState {
     Curious,
     Waking,
     Happy,
+    Surprised,
     Satisfied,
     Music,
     Worried,
@@ -45,6 +46,26 @@ mod tests {
         }
         pet.react(PetState::Satisfied);pet.step(PetState::Satisfied,43.0,0.1,[0.0;2],true);
         assert_eq!(pet.expressions.current(),Some(crate::pet_expressions::Expression::Heart),"喝水反馈应保留优先级");
+    }
+    #[test]
+    fn surprised_feedback_uses_searching_faces_and_keeps_priority(){
+        let mut pet=Pet::default();
+        pet.react(PetState::Surprised);
+        pet.step(PetState::Surprised,0.0,0.1,[0.0;2],true);
+        assert!(matches!(pet.expressions.current(),Some(Expression::Search|Expression::Peek|Expression::Scan)));
+        assert_eq!(pet.state,PetState::Surprised);
+    }
+    #[test]
+    fn awake_idle_adds_hop_glance_and_yawn_micro_actions(){
+        let mut pet=Pet::default();let mut hop=false;let mut glance=false;let mut yawn=false;
+        for frame in 0..140 {
+            pet.step(PetState::Awake,frame as f64/60.0,0.1,[0.0;2],true);
+            let phase=pet.age%16.0;
+            hop|= (3.0..3.8).contains(&phase)&&pet.y< -0.5;
+            glance|= (7.0..8.4).contains(&phase)&&pet.gaze[0].abs()>0.8;
+            yawn|= (11.2..12.7).contains(&phase)&&pet.eyes[0].height<2.2;
+        }
+        assert!(hop && glance && yawn,"待机时应出现跳跃、张望和打哈欠动作");
     }
     #[test]
     fn singing_keeps_each_expression_for_fifteen_seconds_after_the_transition() {
@@ -151,6 +172,19 @@ struct MusicSegment {
     pose:MusicPose,
     elapsed:f32,
     expression:Option<(Expression,f32)>,
+}
+fn yawn_progress(age:f32)->Option<f32> {
+    let phase=age%16.0;
+    (11.2..12.7).contains(&phase).then(||(phase-11.2)/1.5)
+}
+fn idle_glance(age:f32)->Option<f32> {
+    let phase=age%16.0;
+    if (7.0..8.4).contains(&phase) {
+        let direction=if (age as u32/16)%2==0{1.0}else{-1.0};
+        Some(direction*(std::f32::consts::PI*(phase-7.0)/1.4).sin()*2.8)
+    } else {
+        None
+    }
 }
 fn music_segment_at(age:f32)->MusicSegment {
     let cycle=MUSIC_EXPRESSIONS.iter().map(|expression|MUSIC_PERIOD+expression.duration()).sum::<f32>();
@@ -275,6 +309,10 @@ impl Pet {
                 eyes = [Eye::arc(2.6, -1.8); 2];
                 y = -(age * 7.5).sin().abs() * 2.0 * (-age * 0.65).exp();
             },
+            PetState::Surprised => {
+                eyes=[Eye{height:7.2,spread:0.0,curve:0.0,y:-0.5,tilt:0.0};2];
+                look=[0.0,0.0];y=-((age*11.0).sin().abs())*1.3;
+            },
             PetState::Satisfied => {
                 eyes = [Eye::arc(2.2, -1.2); 2];
                 y = (age * 8.0).sin() * 1.2 * (-age * 0.8).exp();
@@ -299,6 +337,18 @@ impl Pet {
             PetState::Focused => { eyes = [Eye::open(1.8); 2]; look = [gaze[0] * 0.2, 0.0]; y = 0.0; },
             PetState::Dozing => { eyes = [Eye::open(0.6); 2]; y = 1.0; look = [0.0; 2]; },
             PetState::Sleeping => { eyes = [Eye::arc(2.4, 1.0); 2]; y = 0.8 + (t as f32 * 1.2).sin() * 0.4; look = [0.0; 2]; },
+        }
+        if self.expressions.current().is_none() && state==PetState::Awake {
+            let phase=age%16.0;
+            if (3.0..3.8).contains(&phase) {
+                y-=(std::f32::consts::PI*(phase-3.0)/0.8).sin().abs()*1.4;
+            }
+            if let Some(dx)=idle_glance(age) {look[0]=dx;}
+            if let Some(p)=yawn_progress(age) {
+                let close=(std::f32::consts::PI*p).sin();
+                eyes=[Eye{height:4.4*(1.0-close*0.86),spread:0.0,curve:0.0,y:-0.3,tilt:0.0};2];
+                look=[0.0,0.0];y=0.8*close;
+            }
         }
         if self.expressions.current().is_some() {eyes=[Eye::open(4.4);2];look=[0.0;2];y=0.0;}
         if self.expressions.current().is_none() && matches!(state, PetState::Awake | PetState::Curious | PetState::Focused | PetState::Worried) {
@@ -352,6 +402,14 @@ impl Pet {
                     c.seg((cx+dx,y-r),(cx+dx,y+r),1.0,theme::GREEN);
                 }
             },
+            PetState::Surprised => {
+                let k=smoothstep(0.0,0.12,self.age)*(1.0-smoothstep(1.8,2.6,self.age));
+                let c=c.faded(k);
+                c.text(cx+15.0,8.5,"!",7.5,W::Bold,theme::YELLOW,H::Left);
+                for (dx,dy) in [(-17.0,7.0),(18.0,6.0),(-13.0,13.0),(15.0,14.0)] {
+                    c.circle(cx+dx,dy,0.9,theme::YELLOW);
+                }
+            },
             PetState::Satisfied => crate::paint::droplet(c,cx+18.0,12.0,5.0,theme::CYAN),
             PetState::Music => {
                 let segment=music_segment_at(self.music_age);
@@ -360,6 +418,15 @@ impl Pet {
             PetState::Worried => {
                 c.fill(cx+17.0,8.0,1.6,4.2,0.8,theme::YELLOW);
                 c.circle(cx+17.8,14.5,0.9,theme::YELLOW);
+            },
+            PetState::Awake => {
+                if let Some(p)=yawn_progress(self.age) {
+                    let open=(std::f32::consts::PI*p).sin();
+                    let rx=1.25+0.75*open;
+                    let ry=0.35+1.45*open;
+                    c.circle(cx-0.8,20.8+self.y,rx.min(ry),theme::WHITE);
+                    c.circle(cx-0.8,20.8+self.y,(rx*0.55).min(ry*0.55),Color32::from_rgb(40,43,52));
+                }
             },
             _ => {},
         }
