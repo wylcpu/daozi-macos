@@ -1094,11 +1094,13 @@ impl eframe::App for Shell {
                 .zip(desktop_cursor())
                 .is_some_and(|((left, top, _, _), (x, y))| {
                     let local = egui::pos2(x as f32 - left, y as f32 - top);
-                    let hit = out
-                        .hit
-                        .union(out.notice_hit.unwrap_or(egui::Rect::NOTHING))
-                        .expand(6.0);
-                    hit.contains(local)
+                    daozai::macos::pointer_should_interact(
+                        out.region,
+                        out.hit,
+                        out.notice_hit,
+                        out.expanded,
+                        local,
+                    )
                 });
             if interactive != self.mac_interactive {
                 self.mac_interactive = interactive;

@@ -195,6 +195,21 @@ pub fn set_window_interactive(interactive: bool) {
     }
 }
 
+pub fn pointer_should_interact(
+    region: eframe::egui::Rect,
+    hit: eframe::egui::Rect,
+    notice_hit: Option<eframe::egui::Rect>,
+    expanded: bool,
+    local: eframe::egui::Pos2,
+) -> bool {
+    expanded
+        || region
+            .union(hit)
+            .union(notice_hit.unwrap_or(eframe::egui::Rect::NOTHING))
+            .expand(8.0)
+            .contains(local)
+}
+
 pub fn window_frame() -> Option<(f32, f32, f32, f32)> {
     unsafe {
         let screen_class = Class::get("NSScreen")?;
@@ -873,6 +888,15 @@ unsafe extern "C" {
 #[cfg(test)]
 mod avoidance_tests {
     use super::*;
+
+    #[test]
+    fn expanded_window_keeps_mouse_events_for_all_island_buttons() {
+        let region=eframe::egui::Rect::from_min_max(eframe::egui::pos2(100.0,20.0),eframe::egui::pos2(540.0,380.0));
+        let hit=eframe::egui::Rect::from_min_max(eframe::egui::pos2(110.0,20.0),eframe::egui::pos2(530.0,360.0));
+        assert!(pointer_should_interact(region,hit,None,false,eframe::egui::pos2(300.0,100.0)));
+        assert!(!pointer_should_interact(region,hit,None,false,eframe::egui::pos2(20.0,100.0)));
+        assert!(pointer_should_interact(region,hit,None,true,eframe::egui::pos2(20.0,100.0)),"展开期间必须能接收按钮点击");
+    }
 
     #[test]
     fn island_hit_bounds_follow_horizontal_and_side_docks() {
